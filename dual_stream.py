@@ -1,6 +1,6 @@
 from flask import Flask, Response
 from picamera2 import Picamera2
-from picamera2 import MappedArray
+from picamera2 import MappedArray  # not strictly needed but harmless
 from picamera2.devices import IMX500
 from picamera2.devices.imx500 import NetworkIntrinsics, postprocess_nanodet_detection
 import cv2
@@ -29,6 +29,8 @@ try:
         if not intrinsics:
             intrinsics = NetworkIntrinsics()
             intrinsics.task = "object detection"
+        elif intrinsics.task != "object detection":
+            print("[WARN] IMX500 network is not an object detection task")
         intrinsics.update_with_defaults()
         print(f"[INFO] IMX500 model loaded: {MODEL_FILE}")
     else:
@@ -38,7 +40,7 @@ except Exception as e:
     imx500 = None
     intrinsics = None
 
-# interesting labels (only used if labels are available)
+# Only used for filtering labels, if labels are present
 INTERESTING = {
     "bird",
     "person",
@@ -66,24 +68,32 @@ try:
         },
     )
     cam0.configure(cfg0)
+    cam0_cfg = None  # we already configured, so we just call start()/stop()
     cam0_ok = True
     print("[INFO] cam0 (IMX219) initialised")
 except Exception as e:
     print(f"[ERROR] cam0 init failed: {e}")
+    cam0_cfg = None
 
 # cam1 = AI IMX500
 cam1_index = imx500.camera_num if imx500 is not None else 1
+cam1_cfg = None
+
 try:
     cam1 = Picamera2(camera_num=cam1_index)
-    cfg1 = cam1.create_video_configuration(
-        main={"size": (4056, 3040), "format": "RGB888"},
-        controls={"FrameRate": 5},
+
+    # Match the demo: preview configuration, RGB888, correct FPS, buffer_count=12
+    fps = intrinsics.inference_rate if (intrinsics and getattr(intrinsics, "inference_rate", None)) else 5
+    cam1_cfg = cam1.create_preview_configuration(
+        main={"format": "RGB888"},
+        controls={"FrameRate": fps},
+        buffer_count=12,
     )
-    cam1.configure(cfg1)
     cam1_ok = True
     print(f"[INFO] cam1 (IMX500) initialised on index {cam1_index}")
 except Exception as e:
     print(f"[ERROR] cam1 init failed: {e}")
+    cam1_cfg = None
 
 # -------------------------------------------------------------------
 # Viewer counters (low consumption)
@@ -192,8 +202,20 @@ def gen1():
     with lock1:
         viewers1 += 1
         if viewers1 == 1:
-            cam1.start()
+            # Start with the exact config we created above
+            if cam1_cfg is not None:
+                cam1.start(cam1_cfg)
+            else:
+                cam1.start()
             print("[INFO] cam1 started")
+
+            # Match demo: set ROI/aspect ratio if needed
+            if intrinsics and intrinsics.preserve_aspect_ratio:
+                imx500.set_auto_aspect_ratio()
+
+            # Show FW progress bar once (safe even if already loaded)
+            if imx500 is not None:
+                imx500.show_network_fw_progress_bar()
 
     last_detections = []
     try:
@@ -211,8 +233,8 @@ def gen1():
 
                 frame = req.make_array("main")
 
-                # draw only interesting classes if labels available
                 labels = getattr(intrinsics, "labels", None) if intrinsics else None
+
                 for d in dets:
                     x, y, w, h = d.box
                     label_name = None
