@@ -14,13 +14,15 @@ cam1 = None
 try:
     cam0 = Picamera2(camera_num=0)
 
-    # IMX219 max: 3280x2464 - with colour correction for bird box
+    # IMX219 max: 3280x2464 - night vision style, long exposure + high gain
     cfg0 = cam0.create_video_configuration(
         main={"size": (3280, 2464), "format": "RGB888"},
         controls={
             "FrameRate": 5,
-            "AwbMode": 0,
-            "ColourGains": (1.2, 1.6)
+            "AeEnable": False,
+            "AwbEnable": False,
+            "AnalogueGain": 10.0,
+            "ExposureTime": 100000
         }
     )
     cam0.configure(cfg0)
@@ -53,18 +55,24 @@ lock1 = threading.Lock()
 def gen0():
     """Stream generator for cam0 (NoIR IMX219)."""
     global viewers0
+    if cam0 is None:
+        return
     with lock0:
         viewers0 += 1
         if viewers0 == 1:
             cam0.start()
+            cam0.set_controls({
+                "FrameRate": 5,
+                "AeEnable": False,
+                "AwbEnable": False,
+                "AnalogueGain": 10.0,
+                "ExposureTime": 100000
+            })
     try:
         while True:
             frame = cam0.capture_array()
-            ok, jpg = cv2.imencode(
-                ".jpg",
-                frame,
-                [int(cv2.IMWRITE_JPEG_QUALITY), 70]
-            )
+            grey = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+            ok, jpg = cv2.imencode(".jpg", grey, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
             if not ok:
                 continue
             yield (b"--frame\r\n"
@@ -73,13 +81,15 @@ def gen0():
     finally:
         with lock0:
             viewers0 -= 1
-            if viewers0 == 0:
+            if viewers0 == 0 and cam0 is not None:
                 cam0.stop()
 
 
 def gen1():
     """Stream generator for cam1 (IMX500)."""
     global viewers1
+    if cam1 is None:
+        return
     with lock1:
         viewers1 += 1
         if viewers1 == 1:
@@ -100,7 +110,7 @@ def gen1():
     finally:
         with lock1:
             viewers1 -= 1
-            if viewers1 == 0:
+            if viewers1 == 0 and cam1 is not None:
                 cam1.stop()
 
 
